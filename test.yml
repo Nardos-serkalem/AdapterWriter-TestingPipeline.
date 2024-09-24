@@ -1,0 +1,103 @@
+# When both the writer and config change, the workflow should prioritize the writer changes 
+name: Adapters and Writers Test
+
+on:
+  push:
+    branches: [ "main" ] 
+    paths:
+      - 'biocypher_metta/adapters/**'
+      - 'biocypher_metta/*.py'
+      - 'config/adapters_config_sample.yaml'
+      - 'create_knowledge_graph.py'
+  pull_request:
+    branches: [ "main" ]
+    paths:
+      - 'biocypher_metta/adapters/**'
+      - 'biocypher_metta/*.py'
+      - 'config/adapters_config_sample.yaml'
+      - 'create_knowledge_graph.py'
+
+jobs:
+  determine_changes:
+    runs-on: ubuntu-latest
+    outputs:
+      adapters_changed: ${{ steps.check_outputs.outputs.adapters_changed }}
+      writers_changed: ${{ steps.check_outputs.outputs.writers_changed }}
+      config_changed: ${{ steps.check_outputs.outputs.config_changed }}
+
+    steps:     
+      - name: Check for changed files
+        id: check_outputs
+        run: |
+          adapters=$(git diff --name-only HEAD^ HEAD | grep 'adapters/')
+          writers=$(git diff --name-only HEAD^ HEAD | grep 'writers/')
+          config=$(git diff --name-only HEAD^ HEAD | grep 'config/adapters_config_sample.yaml')
+
+          echo "::set-output name=adapters_changed::$( [ -n "$adapters" ] && echo true || echo false )"
+          echo "::set-output name=writers_changed::$( [ -n "$writers" ] && echo true || echo false )"
+          echo "::set-output name=config_changed::$( [ -n "$config" ] && echo true || echo false )"
+
+  prepare_config:
+    needs: determine_changes
+    runs-on: ubuntu-latest
+    if: needs.determine_changes.outputs.adapters_changed == 'true' && needs.determine_changes.outputs.config_changed == 'true'
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v3
+        with:
+          python-version: 3.x
+      - name: Install Dependencies
+        run: |
+          pip install pyYAML
+          pip install -r requirements.txt
+      - name: Generate test config
+        run: |
+          if [ "${{ needs.determine_changes.outputs.config_changed }}" == 'true' ]; then
+            echo "Generating test config based on changes..."
+          else
+            echo "Using default sample config. There are adapter changes detected."
+            cp config/adapters_config_sample.yaml config/test_config.yaml
+          fi
+      - name: Upload test config
+        uses: actions/upload-artifact@v3
+        with:
+          name: test-config
+          path: config/test_config.yaml
+
+    run_tasks:
+     needs: [determine_changes, prepare_config]
+     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        adapter: [metta, neo4j, prolog]
+      steps:
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: 3.x # i don't the version of python current u use.
+      - name: Install Dependencies
+        run: |
+          pip install poetry
+          poetry install
+      - name: Download test config
+        uses: actions/download-artifact@v3
+        with:
+          name: test-config
+          path: config/test_config.yaml
+      - name: Run adapter tests
+        run: | # the following condtion cchecks if the writer and config having any update and
+          if [ "${{ needs.determine_changes.outputs.writers_changed }}" == 'true' ] && [ "${{ needs.determine_changes.outputs.config_changed }}" == 'true' ]; then
+            echo "Both writer and config changed, running all adapter tests..."
+            poetry run pytest tests/adapters --config full_sample_config.yml
+          elif [ "${{ needs.determine_changes.outputs.writers_changed }}" == 'true' ]; then
+            echo "Writer changed, running all adapter tests with full sample config..."
+            poetry run pytest tests/adapters --config full_sample_config.yml
+          elif [ "${{ needs.determine_changes.outputs.config_changed }}" == 'true' ]; then
+            echo "Config changed, but no writer changes. Running tests based on config changes..."
+            poetry run pytest tests/adapters --config specific_config.yml
+          elif [ "${{ needs.determine_changes.outputs.adapters_changed }}" == 'true' ]; then
+            echo "Adapters changed, running tests for changed adapters..."
+            poetry run pytest tests/adapters --config specific_config.yml
+          else
+            echo "No significant changes detected, skipping tests."
+          fi
